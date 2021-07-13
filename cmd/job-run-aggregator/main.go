@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"os"
 
 	"github.com/sirupsen/logrus"
@@ -12,6 +13,8 @@ import (
 )
 
 func main() {
+	ctx := context.Background()
+
 	f := jobrunaggregator.NewJobRunAggregatorFlags()
 	if err := f.ParseFlags(os.Args); err != nil {
 		logrus.WithError(err).Fatal("Failed to parse flags")
@@ -19,12 +22,12 @@ func main() {
 	if err := f.Validate(); err != nil {
 		logrus.WithError(err).Fatal("Flags are invalid")
 	}
-	o, err := f.ToOptions()
+	o, err := f.ToOptions(ctx)
 	if err != nil {
 		logrus.WithError(err).Fatal("Failed to build runtime options")
 	}
 
-	if err := o.Run(); err != nil {
+	if err := o.Run(ctx); err != nil {
 		logrus.WithError(err).Fatal("Command failed")
 	}
 }
