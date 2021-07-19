@@ -1,7 +1,6 @@
 package jobrunaggregator
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -10,7 +9,6 @@ import (
 	"path/filepath"
 
 	"google.golang.org/api/option"
-	"gopkg.in/yaml.v2"
 
 	"cloud.google.com/go/storage"
 )
@@ -75,36 +73,34 @@ type JobRunAggregatorOptions struct {
 
 func (o *JobRunAggregatorOptions) Run(ctx context.Context) error {
 	fmt.Printf("Aggregating job runs of type %v.\n", o.JobName)
-	jobRuns, err := o.ReadProwJob(ctx)
+	jobRuns, err := o.ReadProwJobs(ctx)
 	if err != nil {
 		return err
 	}
 
 	for _, jobRun := range jobRuns {
-		buf := &bytes.Buffer{}
-		writer := yaml.NewEncoder(buf)
-		if err := writer.Encode(jobRun); err != nil {
+		// to match GCS bucket
+		if err := jobRun.WriteCache(ctx, o.WorkingDir); err != nil {
 			return err
 		}
 
-		// this structure matches the bucket
-		targetDir := filepath.Join(o.WorkingDir, "logs", o.JobName, jobRun.ProwJob.Labels["prow.k8s.io/build-id"])
-		targetFile := filepath.Join(targetDir, "prowjob.yaml")
-		if err := os.MkdirAll(targetDir, 0755); err != nil {
+		prowJob, err := jobRun.GetProwJob(ctx)
+		if err != nil {
 			return err
 		}
-		if err := ioutil.WriteFile(targetFile, buf.Bytes(), 0644); err != nil {
-			return err
-		}
-
-		if _, ok := jobRun.ProwJob.Labels["release.openshift.io/analysis"]; ok {
+		if _, ok := prowJob.Labels["release.openshift.io/analysis"]; ok {
 			// this structure is one we can work against
-			nameTargetDir := filepath.Join(o.WorkingDir, "by-name", o.JobName, jobRun.ProwJob.Labels["release.openshift.io/analysis"], jobRun.ProwJob.Name)
+			nameTargetDir := filepath.Join(o.WorkingDir, "by-name", o.JobName, prowJob.Labels["release.openshift.io/analysis"], prowJob.Name)
 			nameTargetFile := filepath.Join(nameTargetDir, "prowjob.yaml")
+			prowJobBytes, err := serializeProwJob(prowJob)
+			if err != nil {
+				return err
+			}
+
 			if err := os.MkdirAll(nameTargetDir, 0755); err != nil {
 				return err
 			}
-			if err := ioutil.WriteFile(nameTargetFile, buf.Bytes(), 0644); err != nil {
+			if err := ioutil.WriteFile(nameTargetFile, prowJobBytes, 0644); err != nil {
 				return err
 			}
 		}
