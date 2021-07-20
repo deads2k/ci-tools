@@ -1,4 +1,4 @@
-package jobrunaggregator
+package jobrunaggregatorapi
 
 import (
 	"context"
@@ -13,25 +13,47 @@ import (
 	prowjobv1 "k8s.io/test-infra/prow/apis/prowjobs/v1"
 )
 
-type JobRun struct {
+type gcsJobRun struct {
 	// retrieval mechanisms
-	bkt *storage.BucketHandle
+	bkt              *storage.BucketHandle
+	workingDirectory string
 
-	JobRunID       string
-	GCSProwJobPath string
-	GCSJunitPaths  []string
+	jobName        string
+	jobRunID       string
+	gcsProwJobPath string
+	gcsJunitPaths  []string
 
 	pathToContent map[string][]byte
 }
 
-func NewJobRunPathsFromGCS(bkt *storage.BucketHandle, jobRunId string) *JobRun {
-	return &JobRun{
+func NewGCSJobRun(bkt *storage.BucketHandle, jobName, jobRunID string) JobRun {
+	return &gcsJobRun{
 		bkt:      bkt,
-		JobRunID: jobRunId,
+		jobName:  jobName,
+		jobRunID: jobRunID,
 	}
 }
 
-func (j *JobRun) WriteCache(ctx context.Context, parentDir string) error {
+func (j *gcsJobRun) GetJobName() string {
+	return j.jobName
+}
+func (j *gcsJobRun) GetJobRunID() string {
+	return j.jobRunID
+}
+func (j *gcsJobRun) GetGCSProwJobPath() string {
+	return j.gcsProwJobPath
+}
+func (j *gcsJobRun) GetGCSJunitPaths() []string {
+	return j.gcsJunitPaths
+}
+func (j *gcsJobRun) SetGCSProwJobPath(gcsProwJobPath string) {
+	j.gcsProwJobPath = gcsProwJobPath
+}
+func (j *gcsJobRun) AddGCSJunitPaths(junitPaths ...string) {
+	j.gcsJunitPaths = append(j.gcsJunitPaths, junitPaths...)
+}
+
+func (j *gcsJobRun) WriteCache(ctx context.Context, parentDir string) error {
 	if err := j.writeCache(ctx, parentDir); err != nil {
 		// attempt to remove the dir so we don't leave half the content serialized out
 		_ = os.Remove(parentDir)
@@ -41,12 +63,12 @@ func (j *JobRun) WriteCache(ctx context.Context, parentDir string) error {
 	return nil
 }
 
-func (j *JobRun) writeCache(ctx context.Context, parentDir string) error {
+func (j *gcsJobRun) writeCache(ctx context.Context, parentDir string) error {
 	prowJob, err := j.GetProwJob(ctx)
 	if err != nil {
 		return err
 	}
-	prowJobBytes, err := serializeProwJob(prowJob)
+	prowJobBytes, err := SerializeProwJob(prowJob)
 	if err != nil {
 		return err
 	}
@@ -75,18 +97,18 @@ func (j *JobRun) writeCache(ctx context.Context, parentDir string) error {
 	return nil
 }
 
-func (j *JobRun) GetProwJob(ctx context.Context) (*prowjobv1.ProwJob, error) {
-	if len(j.GCSProwJobPath) == 0 {
+func (j *gcsJobRun) GetProwJob(ctx context.Context) (*prowjobv1.ProwJob, error) {
+	if len(j.gcsProwJobPath) == 0 {
 		return nil, fmt.Errorf("missing prowjob path")
 	}
-	prowBytes, err := j.GetContent(ctx, j.GCSProwJobPath)
+	prowBytes, err := j.GetContent(ctx, j.gcsProwJobPath)
 	if err != nil {
 		return nil, err
 	}
-	return parseProwJob(prowBytes)
+	return ParseProwJob(prowBytes)
 }
 
-func (j *JobRun) GetContent(ctx context.Context, path string) ([]byte, error) {
+func (j *gcsJobRun) GetContent(ctx context.Context, path string) ([]byte, error) {
 	if len(path) == 0 {
 		return nil, fmt.Errorf("missing path")
 	}
@@ -107,7 +129,7 @@ func (j *JobRun) GetContent(ctx context.Context, path string) ([]byte, error) {
 	return ioutil.ReadAll(gcsReader)
 }
 
-func (j *JobRun) GetAllContent(ctx context.Context) (map[string][]byte, error) {
+func (j *gcsJobRun) GetAllContent(ctx context.Context) (map[string][]byte, error) {
 	if len(j.pathToContent) > 0 {
 		return j.pathToContent, nil
 	}
@@ -115,8 +137,8 @@ func (j *JobRun) GetAllContent(ctx context.Context) (map[string][]byte, error) {
 	errs := []error{}
 	ret := map[string][]byte{}
 
-	allPaths := []string{j.GCSProwJobPath}
-	allPaths = append(allPaths, j.GCSJunitPaths...)
+	allPaths := []string{j.gcsProwJobPath}
+	allPaths = append(allPaths, j.gcsJunitPaths...)
 	for _, path := range allPaths {
 		var err error
 		ret[path], err = j.GetContent(ctx, path)

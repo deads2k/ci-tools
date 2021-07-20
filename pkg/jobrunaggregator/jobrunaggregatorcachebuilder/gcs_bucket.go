@@ -1,23 +1,21 @@
-package jobrunaggregator
+package jobrunaggregatorcachebuilder
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/openshift/ci-tools/pkg/jobrunaggregator/jobrunaggregatorapi"
+
 	"cloud.google.com/go/storage"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/api/iterator"
-	goyaml "gopkg.in/yaml.v2"
-	"k8s.io/apimachinery/pkg/util/yaml"
-	prowjobv1 "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	utiltrace "k8s.io/utils/trace"
 )
 
-func (o *JobRunAggregatorOptions) ReadProwJobs(ctx context.Context) ([]*JobRun, error) {
+func (o *JobRunAggregatorCacheBuilderOptions) ReadProwJobs(ctx context.Context) ([]jobrunaggregatorapi.JobRun, error) {
 	fmt.Printf("Reading prowjobs for job %v.\n", o.JobName)
 
 	jobRuns, err := o.getProwJobPathsForJob(ctx)
@@ -31,24 +29,24 @@ func (o *JobRunAggregatorOptions) ReadProwJobs(ctx context.Context) ([]*JobRun, 
 		if _, err := jobRun.GetAllContent(ctx); err != nil {
 			return nil, err
 		}
-		logrus.Infof("retrieved all content for %s", jobRun.GCSProwJobPath)
+		logrus.Infof("retrieved all content for %q", jobRun.GetJobRunID())
 	}
 
 	return jobRuns, nil
 }
 
-func (o *JobRunAggregatorOptions) traceFields() []utiltrace.Field {
+func (o *JobRunAggregatorCacheBuilderOptions) traceFields() []utiltrace.Field {
 	return []utiltrace.Field{
 		{Key: "jobName", Value: o.JobName},
 	}
 }
 
-func (o *JobRunAggregatorOptions) getProwJobPathsForJob(ctx context.Context) ([]*JobRun, error) {
+func (o *JobRunAggregatorCacheBuilderOptions) getProwJobPathsForJob(ctx context.Context) ([]jobrunaggregatorapi.JobRun, error) {
 	trace := utiltrace.New("GetProwJobs", o.traceFields()...)
 	defer trace.LogIfLong(500 * time.Millisecond)
 
-	prowJobRuns := []*JobRun{}
-	runIDToJobRun := map[string]*JobRun{}
+	prowJobRuns := []jobrunaggregatorapi.JobRun{}
+	runIDToJobRun := map[string]jobrunaggregatorapi.JobRun{}
 
 	bkt := o.GCSClient.Bucket(openshiftCIBucket)
 
@@ -100,11 +98,11 @@ func (o *JobRunAggregatorOptions) getProwJobPathsForJob(ctx context.Context) ([]
 			jobRunId := filepath.Base(filepath.Dir(attrs.Name))
 			newJobRun := runIDToJobRun[jobRunId]
 			if newJobRun == nil {
-				newJobRun = NewJobRunPathsFromGCS(bkt, jobRunId)
+				newJobRun = jobrunaggregatorapi.NewGCSJobRun(bkt, o.JobName, jobRunId)
 				runIDToJobRun[jobRunId] = newJobRun
 				prowJobRuns = append(prowJobRuns, newJobRun)
 			}
-			newJobRun.GCSProwJobPath = attrs.Name
+			newJobRun.SetGCSProwJobPath(attrs.Name)
 
 		case strings.HasSuffix(attrs.Name, ".xml") && strings.Contains(attrs.Name, "/junit"):
 			logrus.Infof("Found %s", attrs.Name)
@@ -115,11 +113,11 @@ func (o *JobRunAggregatorOptions) getProwJobPathsForJob(ctx context.Context) ([]
 			jobRunId := nameParts[2]
 			newJobRun := runIDToJobRun[jobRunId]
 			if newJobRun == nil {
-				newJobRun = NewJobRunPathsFromGCS(bkt, jobRunId)
+				newJobRun = jobrunaggregatorapi.NewGCSJobRun(bkt, o.JobName, jobRunId)
 				runIDToJobRun[jobRunId] = newJobRun
 				prowJobRuns = append(prowJobRuns, newJobRun)
 			}
-			newJobRun.GCSJunitPaths = append(newJobRun.GCSJunitPaths, attrs.Name)
+			newJobRun.AddGCSJunitPaths(attrs.Name)
 
 		default:
 			//fmt.Printf("checking %q\n", attrs.Name)
@@ -129,35 +127,15 @@ func (o *JobRunAggregatorOptions) getProwJobPathsForJob(ctx context.Context) ([]
 	trace.Step("List filtered.")
 
 	// eliminate items without prowjob.json
-	ret := []*JobRun{}
+	ret := []jobrunaggregatorapi.JobRun{}
 	for i := range prowJobRuns {
 		jobRun := prowJobRuns[i]
-		if len(jobRun.GCSProwJobPath) == 0 {
-			fmt.Printf("Removing %q because it doesn't have a prowjob.json\n", jobRun.JobRunID)
+		if len(jobRun.GetGCSJunitPaths()) == 0 {
+			fmt.Printf("Removing %q because it doesn't have a prowjob.json\n", jobRun.GetJobRunID())
 			continue
 		}
 		ret = append(ret, jobRun)
 	}
 
 	return ret, nil
-}
-
-func parseProwJob(prowJobBytes []byte) (*prowjobv1.ProwJob, error) {
-	prowJob := &prowjobv1.ProwJob{}
-	err := yaml.NewYAMLOrJSONDecoder(bytes.NewBuffer(prowJobBytes), 4096).Decode(&prowJob)
-	if err != nil {
-		return nil, err
-	}
-	prowJob.ManagedFields = nil
-
-	return prowJob, nil
-}
-
-func serializeProwJob(prowJob *prowjobv1.ProwJob) ([]byte, error) {
-	buf := &bytes.Buffer{}
-	prowJobWriter := goyaml.NewEncoder(buf)
-	if err := prowJobWriter.Encode(prowJob); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }

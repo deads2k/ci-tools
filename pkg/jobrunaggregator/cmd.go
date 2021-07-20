@@ -4,28 +4,35 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
-	"os"
-	"path/filepath"
-
-	"google.golang.org/api/option"
 
 	"cloud.google.com/go/storage"
+	"github.com/openshift/ci-tools/pkg/jobrunaggregator/jobrunaggregatoranalyzer"
+	"github.com/openshift/ci-tools/pkg/jobrunaggregator/jobrunaggregatorcachebuilder"
+	"google.golang.org/api/option"
 )
 
 const (
 	openshiftCIBucket string = "origin-ci-test"
 )
 
+type Runnable interface {
+	Run(ctx context.Context) error
+}
+
 // JobRunAggregatorFlags is used to configure the command and produce the runtime structure
 type JobRunAggregatorFlags struct {
+	Subcommand string
+
+	// common args
 	JobName    string
 	WorkingDir string
+
+	// analyzer args
+	PayloadTag string
 }
 
 func NewJobRunAggregatorFlags() *JobRunAggregatorFlags {
 	return &JobRunAggregatorFlags{
-		JobName:    "periodic-ci-openshift-release-master-ci-4.9-e2e-gcp-upgrade",
 		WorkingDir: "job-aggregator-working-dir",
 	}
 }
@@ -34,8 +41,11 @@ func NewJobRunAggregatorFlags() *JobRunAggregatorFlags {
 func (f *JobRunAggregatorFlags) ParseFlags(args []string) error {
 	fs := flag.NewFlagSet(args[0], flag.ExitOnError)
 
-	fs.StringVar(&f.JobName, "job", f.JobName, "The name of the job to inspect.")
+	fs.StringVar(&f.Subcommand, "subcommand", f.Subcommand, "the subcommand. maybe add cobra. one of [cache, analyze]")
+	fs.StringVar(&f.JobName, "job", f.JobName, "The name of the job to inspect, like periodic-ci-openshift-release-master-ci-4.9-e2e-gcp-upgrade")
 	fs.StringVar(&f.WorkingDir, "working-dir", f.WorkingDir, "The directory to store caches, output, and the like.")
+
+	fs.StringVar(&f.PayloadTag, "payload-tag", f.PayloadTag, "The payload tag to aggregate, like 4.9.0-0.ci-2021-07-19-185802")
 
 	if err := fs.Parse(args[1:]); err != nil {
 		return fmt.Errorf("failed to parse flags: %w", err)
@@ -45,66 +55,58 @@ func (f *JobRunAggregatorFlags) ParseFlags(args []string) error {
 
 // Validate checks to see if the user-input is likely to produce functional runtime options
 func (f *JobRunAggregatorFlags) Validate() error {
+	if len(f.Subcommand) == 0 {
+		return fmt.Errorf("missing --subcommand: one of [cache, analyze]")
+	}
+	if len(f.JobName) == 0 {
+		return fmt.Errorf("missing --job: like periodic-ci-openshift-release-master-ci-4.9-e2e-gcp-upgrade")
+	}
+	if len(f.WorkingDir) == 0 {
+		return fmt.Errorf("missing --working-dir: like job-aggregator-working-dir")
+	}
+
+	switch f.Subcommand {
+	case "cache":
+	case "analyze":
+		if len(f.PayloadTag) == 0 {
+			return fmt.Errorf("missing --payload-tag: like 4.9.0-0.ci-2021-07-19-185802")
+		}
+
+	default:
+		return fmt.Errorf("--subcommand must be one of [cache, analyze]")
+	}
+
 	return nil
 }
 
 // ToOptions goes from the user input to the runtime values need to run the command.
 // Expect to see unit tests on the options, but not on the flags which are simply value mappings.
-func (f *JobRunAggregatorFlags) ToOptions(ctx context.Context) (*JobRunAggregatorOptions, error) {
-	// Create a new GCS Client
-	gcsClient, err := storage.NewClient(ctx, option.WithoutAuthentication())
-	if err != nil {
-		return nil, err
-	}
+func (f *JobRunAggregatorFlags) ToOptions(ctx context.Context) (Runnable, error) {
 
-	return &JobRunAggregatorOptions{
-		JobName:    f.JobName,
-		GCSClient:  gcsClient,
-		WorkingDir: f.WorkingDir,
-	}, nil
-}
-
-// JobRunAggregatorOptions is the runtime struct that is produced from the parsed flags
-type JobRunAggregatorOptions struct {
-	JobName    string
-	GCSClient  *storage.Client
-	WorkingDir string
-}
-
-func (o *JobRunAggregatorOptions) Run(ctx context.Context) error {
-	fmt.Printf("Aggregating job runs of type %v.\n", o.JobName)
-	jobRuns, err := o.ReadProwJobs(ctx)
-	if err != nil {
-		return err
-	}
-
-	for _, jobRun := range jobRuns {
-		// to match GCS bucket
-		if err := jobRun.WriteCache(ctx, o.WorkingDir); err != nil {
-			return err
-		}
-
-		prowJob, err := jobRun.GetProwJob(ctx)
+	switch f.Subcommand {
+	case "cache":
+		// Create a new GCS Client
+		gcsClient, err := storage.NewClient(ctx, option.WithoutAuthentication())
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if _, ok := prowJob.Labels["release.openshift.io/analysis"]; ok {
-			// this structure is one we can work against
-			nameTargetDir := filepath.Join(o.WorkingDir, "by-name", o.JobName, prowJob.Labels["release.openshift.io/analysis"], prowJob.Name)
-			nameTargetFile := filepath.Join(nameTargetDir, "prowjob.yaml")
-			prowJobBytes, err := serializeProwJob(prowJob)
-			if err != nil {
-				return err
-			}
 
-			if err := os.MkdirAll(nameTargetDir, 0755); err != nil {
-				return err
-			}
-			if err := ioutil.WriteFile(nameTargetFile, prowJobBytes, 0644); err != nil {
-				return err
-			}
-		}
+		return &jobrunaggregatorcachebuilder.JobRunAggregatorCacheBuilderOptions{
+			JobName:    f.JobName,
+			GCSClient:  gcsClient,
+			WorkingDir: f.WorkingDir,
+		}, nil
+
+	case "analyze":
+		return &jobrunaggregatoranalyzer.JobRunAggregatorAnalyzerOptions{
+			JobName:    f.JobName,
+			WorkingDir: f.WorkingDir,
+			PayloadTag: f.PayloadTag,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("--subcommand must be one of [cache, analyze]")
 	}
 
-	return nil
+	return nil, fmt.Errorf("--subcommand must be one of [cache, analyze]")
 }
